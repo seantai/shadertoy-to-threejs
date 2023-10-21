@@ -1,231 +1,472 @@
 uniform vec2 iResolution;
 uniform float iTime;
 uniform sampler2D iChannel0;
+uniform vec3 iMouse;
 
+////////////////////////////////////////
+// Classic raytracing
+// Cook-Torrance shading 
+//
+// The shaders displays 3 series of balls with different materials:
+// - Ground: Basic (no reflection, no refraction), roughness and density varying foreach ball.
+// - Along blue wall: Reflective materials, roughness and density varying foreach ball.
+// - Along orange wall: Refractive materials,roughness and density varying foreach ball.
+// - Center: the ball at the center is both reflective and refractive.
+//
+// Hard shadow are supported but enabled only for the ground balls.
+//
 
+struct Material {
+	vec3  color;		// diffuse color
+	bool reflection;	// has reflection 
+	bool refraction;	// has refraction
+	float n;			// refraction index
+	float roughness;	// Cook-Torrance roughness
+	float fresnel;		// Cook-Torrance fresnel reflectance
+	float density;		// Cook-Torrance color density i.e. fraction of diffuse reflection
+};
 
-#define PI (acos(-1.))
-#define TAU (2.*PI)
+struct Light {
+	vec3 pos;
+	vec3 color;
+};
 
-#define sat(x) clamp(x, 0., 1.)
+//////////////////////////////////////
+/// Ray-Primitive intersections
+/// fast version test the existence of 
+/// an intersection
 
-mat2 rot2D(float a)
+struct Inter {
+	vec3 p;		//pos
+	vec3 n; 	//normal
+	vec3 vd;	// viewdir
+	float d;	//distance
+	bool inside; // inside object
+	Material mat; // object material
+};
+
+float fastintSphere(vec3 ro, vec3 rd, vec3 p, float r)
 {
-    return mat2(cos(a), -sin(a), sin(a), cos(a));
+	float dist = -1.;
+	vec3 v = ro-p;
+	float b = dot(v,rd);
+	float c = dot(v,v) - r*r;
+	float d = b*b-c;
+	if (d>0.)
+	{
+		float t1 = (-b-sqrt(d));
+		float t2 = (-b+sqrt(d));
+		if (t2>0.)
+			dist = t1>0.?t1:t2;
+	}
+	return dist;
 }
 
-// Cubic smin function
-// https://iquilezles.org/articles/smin
-float smin( float a, float b, float k )
+void intSphere(vec3 ro, vec3 rd, vec3 p, float r, Material mat, inout Inter i)
 {
-    float h = max(k - abs(a - b), 0.0 ) / k;
-    return min(a, b) - h*h*h*k * (1.0 / 6.0);
+	float dist = -1.;
+	vec3 v = ro-p;
+	float b = dot(v,rd);
+	float c = dot(v,v) - r*r;
+	float d = b*b-c;
+	if (d>0.)
+	{
+		float t1 = (-b-sqrt(d));
+		float t2 = (-b+sqrt(d));
+		if (t2>0.)
+		{
+			dist = t1>0.?t1:t2;
+			if ((dist<i.d)||(i.d<0.))
+			{
+				i.p = ro+dist*rd;
+				i.n = normalize(i.p-p);
+				i.d = dist;
+				i.vd = -rd;
+				i.inside = t1<0.;
+				if (i.inside)
+					i.n *= -1.; //invert the normal when hitting inside during refraction
+				i.mat = mat;
+			}
+		}
+	}
 }
 
-float smax( float a, float b, float k )
+float fastintPlane(vec3 ro, vec3 rd, vec3 p, vec3 n)
 {
-    return -smin(-a, -b, k);
+	float res = -1.;
+	float dpn = dot(rd,n);
+	if (abs(dpn)>0.00001)
+		res = (-(dot(n, p) + dot(n,ro)) / dpn);
+	return res;
 }
 
-// Cosine Color Palette
-// https://iquilezles.org/articles/palettes
-vec3 palette( float t )
+bool intPlane(vec3 ro, vec3 rd, vec3 p, vec3 n, Material mat, inout Inter i)
 {
-    return 0.52 + 0.48*cos( TAU * (vec3(.9, .8, .5) * t + vec3(0.1, .05, .1)) );
+	float d = -1.;
+	float dpn = dot(rd,n);
+	if (abs(dpn)>0.00001)
+	{
+		d = -(dot(n, p) + dot(n,ro)) / dpn;
+		if ((d>0.)&&((d<i.d)||(i.d<0.)))
+		{
+			i.p = ro+d*rd;
+			i.n = n;
+			i.d = d;
+			i.vd = -rd;
+			i.inside = false;
+			i.mat = mat;
+		}
+	}
+	return (i.d==d);
 }
 
-
-// Hash without Sine
-// https://www.shadertoy.com/view/4djSRW
-// MIT License...
-/* Copyright (c) 2014 David Hoskins.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.*/
-
-float hash12(vec2 p)
+//////////////////////////////////////
+/// Shading functions
+vec3 shadeBlinnPhong( Inter i, vec3 lp )
 {
-    p = p * 1.1213;
-	vec3 p3  = fract(vec3(p.xyx) * .1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+	float diffuse = 0.6;
+	float specular = 0.4;
+	
+	vec3 res = vec3(0.);
+	vec3 ld = normalize(lp-i.p);
+	res = i.mat.color*diffuse*dot(i.n,ld);
+	vec3 h = normalize(i.vd+ld);
+	res += specular*pow(dot(i.n,h), 16.);
+	return res;
 }
 
-
-// Straight Flagstone Tiles (aka Asymmetric Tiles)
-// https://www.shadertoy.com/view/7tKGRc
-
-/**
- * Flagstone/Asymmetric tiling with tile IDs, sizes and UVs.
- * 
- * Like with my previous shader (https://www.shadertoy.com/view/flVGzm),
- * the tile IDs are computed first, and the UVs are derived from it,
- * by subtracting from the original position, and scaling by the tile size.
- * 
- * This has the advantage of not dealing with the mess that is
- * getting the UVs for each corner, and gives you already the tile ID.
- * It's great for rectangular tilings, as long as you know what the size of the tile is.
- * 
- * The distances from this does have discontinuities in the edges
- * 
- * Next time, I'd like to try doing the organic flagstone tiles with asymmetric sizes
- * Distance-to-edge voronoi is pretty close to it, but the sizes aren't so varied. :(
- * Maybe there's a way to do it in a similar vein like this one.
- * 
- * Many thanks to Shane (hello!) and fizzer for their methods
- * from which this shader is derived from:
- * 
- *   Variegated Tiling by fizzer
- *   https://www.shadertoy.com/view/3styzn
- *
- *   Asymmetric Blocks by Shane
- *   https://www.shadertoy.com/view/Ws3GRs
- *
- *   For a 3D raytraced version:
- *   Extruded Flagstone Tiling 3D by gelami
- *   https://www.shadertoy.com/view/cltGRl
-**/
-
-#define ANIMATED
-#define GLOW
-
-#define SCROLLING
-
-//#define SHOW_CHECKER
-//#define SHOW_GRID
-//#define SHOW_ID
-//#define SHOW_UV
-
-const float SCALE = 4.;
-const float SMOOTHNESS = 0.15;
-
-float randSpan( vec2 p )
+vec3 shadePhong( Inter i, vec3 lp )
 {
-    #ifdef ANIMATED
-    return (sin(iTime*1.6 + hash12(p)*TAU)*.5+.5)*.6+.2;
-    #else
-    return hash12(p)*.6+.2;
-    #endif
+	float diffuse = 0.6;
+	float specular = 0.4;
+	
+	vec3 res = vec3(0.);
+	vec3 ld = normalize(lp-i.p);
+	res = i.mat.color*diffuse*dot(i.n,ld);
+	res += specular*pow( clamp(dot(reflect(i.vd,i.n),ld),0.,1.), 16.);
+	return res;
+}
+
+/// References:
+/// http://content.gpwiki.org/index.php/D3DBook:%28Lighting%29_Cook-Torrance
+/// http://ruh.li/GraphicsCookTorrance.html
+vec3 shadeCookTorrance( Inter i, Light lig )
+{
+	float roughness = i.mat.roughness;
+	float F0 = i.mat.fresnel;
+	float K = i.mat.density;
+	//
+	vec3 ld = normalize(lig.pos-i.p);
+	vec3 h = normalize(i.vd+ld);
+	float NdotL = clamp( dot( i.n, ld ),0.,1. );
+	float NdotH = clamp( dot( i.n, h ),0.,1. );
+	float NdotV = clamp( dot( i.n, i.vd ),0.,1. );
+	float VdotH = clamp( dot( h, i.vd ),0.,1. );
+	float rsq = roughness * roughness;
+	
+	// Geometric Attenuation
+	float NH2   = 2. * NdotH / VdotH;
+	float geo_b = (NH2 * NdotV );
+	float geo_c = (NH2 * NdotL );
+	float geo   = min( 1., min( geo_b, geo_c ) );
+	
+	// Roughness
+	// Beckmann distribution function
+	float r1 = 1. / ( 4. * rsq * pow(NdotH, 4.));
+	float r2 = (NdotH * NdotH - 1.) / (rsq * NdotH * NdotH);
+	float rough = r1 * exp(r2);
+	
+	// Fresnel			
+	float fres = pow( 1.0 - VdotH, 5. );
+	fres *= ( 1.0 - F0 );
+	fres += F0;
+	
+	vec3 spec = (NdotV * NdotL==0.) ? vec3(0.) : vec3 ( fres * geo * rough ) / ( NdotV * NdotL );
+	vec3 res = NdotL * ( (1.-K)*spec + K*i.mat.color ) * lig.color;// * exp(-0.001*length(lig.pos-i.p));
+	return res;
+}
+
+////////////////////////////////////
+// Raytracing
+
+float hidden( Inter i, vec3 lp)
+{
+	vec3 ro = i.p;
+	float dmax = length(lp-ro);
+	vec3 rd = normalize(lp-ro);
+	ro += 0.001*rd;
+	//
+	float hit = -1.;
+	vec3 p = vec3(0.,0.,0.);
+	vec3 n = vec3(0.,1.,0.);
+	hit = fastintPlane( ro, rd, p, n);
+	hit = hit>dmax?-1.:hit;
+	//
+	if (hit<0.)
+	{
+		float pi = 1.25;
+		p = vec3(-2.5,0.5,-2.5);
+		for (int k=0; k<5; ++k)
+		{
+			p.z = -2.5;
+			for (int l=0;l<5;++l)
+			{
+				hit = fastintSphere( ro, rd, p, 0.5);
+				if ((hit>0.) && (hit<dmax)) break;
+				p.z += pi;
+			}
+			if (hit>0.) break;
+			p.x += pi;
+		}
+	}
+	return hit;
+}
+
+vec3 raytraceRay( vec3 ro, vec3 rd, inout Inter i)
+{
+	Material mat;
+	mat.color = vec3(0.75);
+	mat.reflection = false;
+	mat.refraction = false;
+	mat.n = 1.;
+	mat.fresnel = 0.8;
+	mat.roughness = 1.;
+	mat.density = 1.;
+	vec3 p = vec3(0.,0.,0.);
+	vec3 n = vec3(0.,1.,0.);
+	if (intPlane( ro, rd, p, n, mat, i))
+	{
+		// checker plane hack
+		i.mat.color = vec3(0.75)*mod(floor(i.p.x)+floor(i.p.z),2.)+0.25;
+	}
+	//
+	p = vec3(-8.,0.,0.);
+	n = vec3(-1.,0.,0.);
+	if (intPlane( ro, rd, p, n, mat, i))
+	{
+		// checker plane hack
+		i.mat.color = vec3(0.95,0.35,0.)*mod(floor(i.p.y)+floor(i.p.z),2.)+0.25;
+	}
+	//
+	p = vec3(0.,0.,8.);
+	n = vec3(0.,0.,1.);
+	if (intPlane( ro, rd, p, n, mat, i))
+	{
+		// checker plane hack
+		i.mat.color = vec3(0.35,0.65,0.95)*mod(floor(i.p.x)+floor(i.p.y),2.)+0.25;
+	}
+	//
+	mat.color = vec3(1.0,1.0,0.25);
+	mat.reflection = false;
+	mat.refraction = false;
+	mat.n = 1.;
+	mat.fresnel = 0.8;
+	mat.roughness = 0.1;
+	mat.density = 0.95;
+	float pi = 1.25;
+	float ri = 0.2;
+	p = vec3(-2.5,0.5,-2.5);
+	for (int k=0; k<5; ++k)
+	{
+		mat.roughness = 0.1;
+		p.z = -2.5;
+		for (int l=0; l<5; ++l)
+		{
+			intSphere( ro, rd, p, 0.5, mat, i);
+			mat.roughness += ri;
+			p.z += pi;
+		}
+		mat.density -= ri;
+		p.x += pi;
+	}
+	//
+	mat.color = vec3(1.0,1.0,0.25);
+	mat.reflection = true;
+	mat.refraction = false;
+	mat.n = 1.;
+	mat.fresnel = 0.8;
+	mat.roughness = 0.1;
+	mat.density = 0.95;
+	pi = 1.25;
+	ri = 0.2;
+	p = vec3(-2.5,1.,-4.);
+	for (int k=0; k<5; ++k)
+	{
+		mat.roughness = 0.1;
+		p.y = 1.;
+		for (int l=0; l<5; ++l)
+		{
+			intSphere( ro, rd, p, 0.5, mat, i);
+			mat.roughness += ri;
+			p.y += pi;
+		}
+		mat.density -= ri;
+		p.x += pi;
+	}
+	//
+	mat.color = vec3(1.0,1.0,0.25);
+	mat.reflection = false;
+	mat.refraction = true;
+	mat.n = 1.16;
+	mat.fresnel = 0.8;
+	mat.roughness = 0.9;
+	mat.density = 0.15;
+	pi = 1.25;
+	ri = 0.2;
+	p = vec3(4.,1.,2.5);
+	for (int k=0; k<5; ++k)
+	{
+		mat.density = 0.15;
+		p.y = 1.;
+		for (int l=0; l<5; ++l)
+		{
+			intSphere( ro, rd, p, 0.5, mat, i);
+			mat.density += ri;
+			p.y += pi;
+		}
+		mat.roughness -= ri;
+		p.z -= pi;
+	}
+	//
+	mat.color = vec3(0.0,1.0,1.0);
+	mat.reflection = true;
+	mat.refraction = true;
+	mat.n = 1.33;
+	mat.fresnel = 0.8;
+	mat.roughness = .1;
+	mat.density = 0.5;
+	p = vec3(0.,4.0,0.);
+	intSphere( ro, rd, p, 1.5, mat, i);
+	//
+	vec3 col = vec3(0.1,0.1,0.1);
+	if (i.d>0.)
+	{
+		// ambiant
+		float ambiant = 0.1;
+		col = ambiant*i.mat.color;
+		
+		if (!i.inside)
+		{
+			// lighting
+			Light lig;
+			lig.color = vec3(1.,1.,1.);
+			lig.pos = vec3(0., 6., 0.);
+			if (hidden(i,lig.pos)<0.)
+				col += 0.5*shadeCookTorrance(i, lig);
+			lig.pos = vec3(-4., 6., -4.);
+			if (hidden(i,lig.pos)<0.)
+				col += 0.5*shadeCookTorrance(i, lig);
+		}
+	}
+	return clamp(col,0.,1.);
+}
+
+vec3 raytrace( vec3 ro, vec3 rd)
+{
+	Inter i;
+	i.p = vec3(0.,0.,0.);
+	i.n = vec3(0.,0.,0.);
+	i.d = -1.;
+	i.vd = vec3(0.,0.,0.);
+	i.inside = false;
+	//
+	vec3 accum = vec3(0.);
+	vec3 col = vec3(0.);
+	float refl = 1.;
+	float refr = 1.;
+	col = raytraceRay(ro, rd, i);
+	accum += col; // * exp(-0.0005*i.d*i.d);
+	if (i.mat.reflection)
+	{
+		Inter li = i;
+		vec3 lro = ro;
+		vec3 lrd = rd;
+		lro = li.p;
+		lrd = reflect(-li.vd,li.n);
+		lro += 0.0001*lrd;
+		for (int k=1; k<4; ++k)
+		{
+			li.d = -1.;
+			refl *= 1.-i.mat.density;
+			//
+			col = raytraceRay(lro, lrd, li);
+			//
+			accum += col * refl; // * exp(-0.005*i.d*i.d);
+			if ((li.d<.0)||(!li.mat.reflection)) break;
+			lro = li.p;
+			lrd = reflect(-li.vd,li.n);
+			lro += 0.0001*lrd;
+		}
+	}
+	if (i.mat.refraction)
+	{
+		Inter li = i;
+		vec3 lro = ro;
+		vec3 lrd = rd;
+		float n = 1./li.mat.n;
+		float cosI = -dot(li.n,li.vd);
+		float cost2 = 1.-n*n*(1.-cosI*cosI);
+		if (cost2>0.)
+		{
+			lro = li.p;
+			lrd = normalize(-li.vd*n+li.n*(n*cosI - sqrt(cost2)));
+			lro += 0.0001*lrd;
+			for (int k=1; k<4; ++k)
+			{
+				li.d = -1.;
+				refr *= 1.-li.mat.density;
+				//
+				col = raytraceRay(lro, lrd, li);
+				//
+				accum += col * refr; //* exp(-0.005*i.d*i.d);
+				if ((li.d<.0)||(!li.mat.refraction)) break;
+				if (li.inside)
+					n = li.mat.n;
+				else
+					n = 1./li.mat.n;
+				cosI = -dot(li.n,li.vd);
+				cost2 = 1.-n*n*(1.-cosI*cosI);
+				if (cost2<=0.) break;
+				lro = li.p;
+				lrd = normalize(-li.vd*n+li.n*(n*cosI - sqrt(cost2)));
+				lro += 0.0001*lrd;
+			}
+		}
+	}
+	return clamp(accum,0.,1.);
 }
 
 void mainImage( out vec4 fragColor, in vec2 fragCoord )
 {
-    vec2 uv = (2.*fragCoord - iResolution.xy) / iResolution.y;
-    
-    uv *= SCALE;
-    
-    #ifdef SCROLLING
-    uv += vec2(.7, .5) * iTime;
-    #endif
+	vec2 q = fragCoord.xy/iResolution.xy;
+    vec2 p = -1.0+2.0*q;
+	p.x *= iResolution.x/iResolution.y;
+		 
+	float Time = 0.45*(15.0 + iTime);
+	// camera	
+	vec3 ro = vec3( 8.0*cos(Time), 6.0, 8.0*sin(Time) );
+//	vec3 ro = vec3( -8.0, 6.0, 8.0 );
+	vec3 ta = vec3( 0.0, 2.5, 0. );
 
-    vec2 fl = floor(uv);
-    vec2 fr = fract(uv);
-    
-    bool ch = mod(fl.x + fl.y, 2.) > .5;
-    
-    float r1 = randSpan(fl);
-    vec2 ax = ch ? fr.xy : fr.yx;
-    
-    float a1 = ax.x - r1;
-    float si = sign(a1);
-    vec2 o1 = ch ? vec2(si, 0) : vec2(0, si);
-    
-    float r2 = randSpan(fl + o1);
-    float a2 = ax.y - r2;
-    
-    vec2 st = step(vec2(0), vec2(a1, a2));
-    
-    // Tile ID
-    vec2 of = ch ? st.xy : st.yx;
-    vec2 id = fl + of - 1.;
-    
-    bool ch2 = mod(id.x + id.y, 2.) > .5;
-    
-    // Get the random spans
-    float r00 = randSpan(id + vec2(0, 0));
-    float r10 = randSpan(id + vec2(1, 0));
-    float r01 = randSpan(id + vec2(0, 1));
-    float r11 = randSpan(id + vec2(1, 1));
-    
-    // Tile Size
-    vec2 s0 = ch2 ? vec2(r00, r10) : vec2(r01, r00);
-    vec2 s1 = ch2 ? vec2(r11, r01) : vec2(r10, r11);
-    vec2 s = 1. - s0 + s1;
-    
-    // UV
-    vec2 puv = (uv - id - s0) / s;
-    
-    // Border Distance
-    vec2 b = (.5 - abs(puv - .5)) * s;
-    
-    float d = smin(b.x, b.y, SMOOTHNESS);
-    float l = smoothstep(.02, .06, d);
-    
-    // **** Shading ****
-    
-    // Highlights
-    vec2 hp = (1. - puv) * s;
-    float h = smoothstep(.08, .0, max(smin(hp.x, hp.y, SMOOTHNESS), 0.));
-    
-    // Shadows
-    vec2 sp = puv * s;
-    float sh = smoothstep(.05, .12, max(smin(sp.x, sp.y, SMOOTHNESS), 0.));
-    
-    // Texture
-    vec3 tex = pow(texture(iChannel0, puv).rgb, vec3(2.2));
-    
-    // Random Color
-    vec3 col = palette(hash12(id));
-    
-    col *= tex;
-    col *= (vec3(puv, 0) * .6 + .4);
-    col *= sh * .8 + .2;
-    col += h * vec3(.9, .7, .5);
-    col *= l * 5.;
-    
-    // **** Defines ****
-    #ifdef GLOW
-    vec2 gv = (1.1 - fragCoord / iResolution.xy) * iResolution.x / iResolution.y;
-    col += pow(.12 / length(gv), 1.5) * vec3(1., .8, .4) * (l * 0.3 + 0.7);
-    #endif
-    
-    #ifdef SHOW_ID
-    col = vec3(id, 0);
-    #endif
-    
-    #ifdef SHOW_UV
-    col = vec3(puv, 0);
-    #endif
-    
-    #ifdef SHOW_GRID
-    vec2 g = .5 - abs(fr - .5);
-    float grid = smoothstep(.03, .02, min(g.x, g.y));
-    col = mix(col, vec3(.2, .9, 1), grid);
-    #endif
-    
-    #ifdef SHOW_CHECKER
-    col = mix(col, (ch ? vec3(1, .2, .2) : vec3(.2, 1, .2)), .2);
-    #endif
-    
-    // Tonemapping and Gamma Correction
-    col = max(col, vec3(0));
-    col = col / (1. + col);
-    col = pow(col, vec3(1./2.2));
-    fragColor = vec4(col, 1);
+	vec2 m = iMouse.xy / iResolution.xy;
+	if( iMouse.z>0.0 )
+	{
+		float hd = -m.x * 14.0 + 3.14159;
+		float elv = m.y * 3.14159 * 0.4 - 3.14159 * 0.25;
+		ro = vec3(sin(hd) * cos(elv), sin(elv), cos(hd) * cos(elv));
+		ro = ro * 8.0 + vec3(0.0, 6.0, 0.0);
+	}
+	
+	// camera tx
+	vec3 cw = normalize( ta-ro );
+	vec3 cp = vec3( 0.0, 1.0, 0.0 );
+	vec3 cu = normalize( cross(cw,cp) );
+	vec3 cv = normalize( cross(cu,cw) );
+	vec3 rd = normalize( p.x*cu + p.y*cv + 2.5*cw );
+
+    vec3 col = raytrace( ro, rd );
+	
+	fragColor=vec4( col, 1.0 );
 }
+
 void main() { mainImage(gl_FragColor, gl_FragCoord.xy); }

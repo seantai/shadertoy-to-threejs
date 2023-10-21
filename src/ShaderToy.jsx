@@ -10,12 +10,15 @@ const ShaderToy = ({ scene }) => {
 
     const textureLoader = new THREE.TextureLoader();
 
+    const mouse = new THREE.Vector2();
+
     // Set up a custom shader material with uniforms for time and resolution
     const customShaderMaterial = new THREE.ShaderMaterial({
       uniforms: {
         iTime: { value: 0 },
         iResolution: { value: new THREE.Vector2(600,600) },
-        iChannel0: {value: textureLoader.load('bd6464771e47eed832c5eb2cd85cdc0bfc697786b903bfd30f890f9d4fc36657.jpg')}
+        iChannel0: {value: textureLoader.load('bd6464771e47eed832c5eb2cd85cdc0bfc697786b903bfd30f890f9d4fc36657.jpg')},
+        iMouse: {value: mouse},
       },
       // Vertex shader positions vertices in 3D space
       vertexShader: `
@@ -37,6 +40,11 @@ const ShaderToy = ({ scene }) => {
 
     // Update the shader material's resolution uniform
     customShaderMaterial.uniforms.iResolution.value.set(window.innerWidth, window.innerHeight);
+
+    document.addEventListener('mousemove', (event) => {
+      mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+  });
 
     // Set up an animation loop that updates the time uniform
     const animate = () => {
