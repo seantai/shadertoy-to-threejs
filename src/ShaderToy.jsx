@@ -8,11 +8,14 @@ const ShaderToy = ({ scene }) => {
     // Return early if there's no scene
     if (!scene) return;
 
+    const textureLoader = new THREE.TextureLoader();
+
     // Set up a custom shader material with uniforms for time and resolution
     const customShaderMaterial = new THREE.ShaderMaterial({
       uniforms: {
         iTime: { value: 0 },
         iResolution: { value: new THREE.Vector2(600,600) },
+        iChannel0: {value: textureLoader.load('bd6464771e47eed832c5eb2cd85cdc0bfc697786b903bfd30f890f9d4fc36657.jpg')}
       },
       // Vertex shader positions vertices in 3D space
       vertexShader: `

@@ -1,221 +1,231 @@
 uniform vec2 iResolution;
 uniform float iTime;
+uniform sampler2D iChannel0;
+
+
+
+#define PI (acos(-1.))
+#define TAU (2.*PI)
+
+#define sat(x) clamp(x, 0., 1.)
+
+mat2 rot2D(float a)
+{
+    return mat2(cos(a), -sin(a), sin(a), cos(a));
+}
+
+// Cubic smin function
+// https://iquilezles.org/articles/smin
+float smin( float a, float b, float k )
+{
+    float h = max(k - abs(a - b), 0.0 ) / k;
+    return min(a, b) - h*h*h*k * (1.0 / 6.0);
+}
+
+float smax( float a, float b, float k )
+{
+    return -smin(-a, -b, k);
+}
+
+// Cosine Color Palette
+// https://iquilezles.org/articles/palettes
+vec3 palette( float t )
+{
+    return 0.52 + 0.48*cos( TAU * (vec3(.9, .8, .5) * t + vec3(0.1, .05, .1)) );
+}
+
+
+// Hash without Sine
+// https://www.shadertoy.com/view/4djSRW
+// MIT License...
+/* Copyright (c) 2014 David Hoskins.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.*/
+
+float hash12(vec2 p)
+{
+    p = p * 1.1213;
+	vec3 p3  = fract(vec3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+
+// Straight Flagstone Tiles (aka Asymmetric Tiles)
+// https://www.shadertoy.com/view/7tKGRc
 
 /**
-    License: Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
-    
-    Year of Truchets #057
-    10/20/2023  @byt3_m3chanic
-    Truchet Core \M/->.<-\M/ 2023 
-    
-    see all https://www.shadertoy.com/user/byt3_m3chanic/sort=newest
-*/
+ * Flagstone/Asymmetric tiling with tile IDs, sizes and UVs.
+ * 
+ * Like with my previous shader (https://www.shadertoy.com/view/flVGzm),
+ * the tile IDs are computed first, and the UVs are derived from it,
+ * by subtracting from the original position, and scaling by the tile size.
+ * 
+ * This has the advantage of not dealing with the mess that is
+ * getting the UVs for each corner, and gives you already the tile ID.
+ * It's great for rectangular tilings, as long as you know what the size of the tile is.
+ * 
+ * The distances from this does have discontinuities in the edges
+ * 
+ * Next time, I'd like to try doing the organic flagstone tiles with asymmetric sizes
+ * Distance-to-edge voronoi is pretty close to it, but the sizes aren't so varied. :(
+ * Maybe there's a way to do it in a similar vein like this one.
+ * 
+ * Many thanks to Shane (hello!) and fizzer for their methods
+ * from which this shader is derived from:
+ * 
+ *   Variegated Tiling by fizzer
+ *   https://www.shadertoy.com/view/3styzn
+ *
+ *   Asymmetric Blocks by Shane
+ *   https://www.shadertoy.com/view/Ws3GRs
+ *
+ *   For a 3D raytraced version:
+ *   Extruded Flagstone Tiling 3D by gelami
+ *   https://www.shadertoy.com/view/cltGRl
+**/
 
-#define R   iResolution
-#define M   iMouse
-#define T   iTime
-#define PI  3.14159265359
-#define PI2 6.28318530718
+#define ANIMATED
+#define GLOW
 
-#define MAX_DIST    100.
-#define MIN_DIST    .0001
+#define SCROLLING
 
-float hash21(vec2 p){return fract(sin(dot(p,vec2(23.43,84.21)))*4832.323); }
-mat2 rot(float a){ return mat2(cos(a),sin(a),-sin(a),cos(a)); }
+//#define SHOW_CHECKER
+//#define SHOW_GRID
+//#define SHOW_ID
+//#define SHOW_UV
 
-float noise (in vec2 uv) {
-    vec2 i = floor(uv),f = fract(uv);
-    float a = hash21(i),b = hash21(i+vec2(1,0)),c = hash21(i+vec2(0,1)),d = hash21(i+vec2(1,1));
-    vec2 u = f*f*(3.-2.*f);
-    return mix(a,b,u.x) + (c-a)*u.y*(1.-u.x) + (d-b)*u.x*u.y;
+const float SCALE = 4.;
+const float SMOOTHNESS = 0.15;
+
+float randSpan( vec2 p )
+{
+    #ifdef ANIMATED
+    return (sin(iTime*1.6 + hash12(p)*TAU)*.5+.5)*.6+.2;
+    #else
+    return hash12(p)*.6+.2;
+    #endif
 }
 
-float box(vec3 p, vec3 s) {p=abs(p)-s;return length(max(p,0.))+min(max(p.x,max(p.y,p.z)),0.);}
-
-vec3 hit=vec3(0),hitPoint,gid,sid,speed=vec3(0);
-float wtime;
-
-const float size = 1.3;
-const float hlf = size/2.;
-const float dbl = size*2.;
-          
-vec2 map(in vec3 p) {
-    vec2 res = vec2(1e5,0.);
-    vec3 ps = p, q;
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+    vec2 uv = (2.*fragCoord - iResolution.xy) / iResolution.y;
     
-    p += speed;
+    uv *= SCALE;
+    
+    #ifdef SCROLLING
+    uv += vec2(.7, .5) * iTime;
+    #endif
 
-    float id,nz=0.;
-    for(int i = 0; i<2; i++) {
-
-        float cnt = i<1 ? size : dbl;
-        q = vec3(p.x-cnt,p.yz);
-        id = floor(q.x/dbl) + .5;
-        q.x -= (id)*dbl;
-        float qf = (id)*dbl + cnt;
-
-        vec2 nvec = i==1 ? vec2((qf*2.35)+wtime,q.z*.145): vec2(q.z*.185,(qf*5.175)+wtime);
-        nz = noise(nvec);
-        
-        float dz = nz*1.25;
-        float tz = dz+dz*sin(q.z*.55);
-        tz += dz+dz*cos(q.x*.35);
-        q.y += tz;
-
-        float d = box(q,vec3(.52,.52,50))-.05;
-
-        if(d<res.x){
-            res = vec2(d,1.);
-            hitPoint = q;
-            gid = vec3(qf,nz,float(i));
-        }
-    }
-    return res;
+    vec2 fl = floor(uv);
+    vec2 fr = fract(uv);
+    
+    bool ch = mod(fl.x + fl.y, 2.) > .5;
+    
+    float r1 = randSpan(fl);
+    vec2 ax = ch ? fr.xy : fr.yx;
+    
+    float a1 = ax.x - r1;
+    float si = sign(a1);
+    vec2 o1 = ch ? vec2(si, 0) : vec2(0, si);
+    
+    float r2 = randSpan(fl + o1);
+    float a2 = ax.y - r2;
+    
+    vec2 st = step(vec2(0), vec2(a1, a2));
+    
+    // Tile ID
+    vec2 of = ch ? st.xy : st.yx;
+    vec2 id = fl + of - 1.;
+    
+    bool ch2 = mod(id.x + id.y, 2.) > .5;
+    
+    // Get the random spans
+    float r00 = randSpan(id + vec2(0, 0));
+    float r10 = randSpan(id + vec2(1, 0));
+    float r01 = randSpan(id + vec2(0, 1));
+    float r11 = randSpan(id + vec2(1, 1));
+    
+    // Tile Size
+    vec2 s0 = ch2 ? vec2(r00, r10) : vec2(r01, r00);
+    vec2 s1 = ch2 ? vec2(r11, r01) : vec2(r10, r11);
+    vec2 s = 1. - s0 + s1;
+    
+    // UV
+    vec2 puv = (uv - id - s0) / s;
+    
+    // Border Distance
+    vec2 b = (.5 - abs(puv - .5)) * s;
+    
+    float d = smin(b.x, b.y, SMOOTHNESS);
+    float l = smoothstep(.02, .06, d);
+    
+    // **** Shading ****
+    
+    // Highlights
+    vec2 hp = (1. - puv) * s;
+    float h = smoothstep(.08, .0, max(smin(hp.x, hp.y, SMOOTHNESS), 0.));
+    
+    // Shadows
+    vec2 sp = puv * s;
+    float sh = smoothstep(.05, .12, max(smin(sp.x, sp.y, SMOOTHNESS), 0.));
+    
+    // Texture
+    vec3 tex = pow(texture(iChannel0, puv).rgb, vec3(2.2));
+    
+    // Random Color
+    vec3 col = palette(hash12(id));
+    
+    col *= tex;
+    col *= (vec3(puv, 0) * .6 + .4);
+    col *= sh * .8 + .2;
+    col += h * vec3(.9, .7, .5);
+    col *= l * 5.;
+    
+    // **** Defines ****
+    #ifdef GLOW
+    vec2 gv = (1.1 - fragCoord / iResolution.xy) * iResolution.x / iResolution.y;
+    col += pow(.12 / length(gv), 1.5) * vec3(1., .8, .4) * (l * 0.3 + 0.7);
+    #endif
+    
+    #ifdef SHOW_ID
+    col = vec3(id, 0);
+    #endif
+    
+    #ifdef SHOW_UV
+    col = vec3(puv, 0);
+    #endif
+    
+    #ifdef SHOW_GRID
+    vec2 g = .5 - abs(fr - .5);
+    float grid = smoothstep(.03, .02, min(g.x, g.y));
+    col = mix(col, vec3(.2, .9, 1), grid);
+    #endif
+    
+    #ifdef SHOW_CHECKER
+    col = mix(col, (ch ? vec3(1, .2, .2) : vec3(.2, 1, .2)), .2);
+    #endif
+    
+    // Tonemapping and Gamma Correction
+    col = max(col, vec3(0));
+    col = col / (1. + col);
+    col = pow(col, vec3(1./2.2));
+    fragColor = vec4(col, 1);
 }
-
-vec3 normal(vec3 p, float t) {
-    float e = MIN_DIST*t;
-    vec2 h =vec2(1,-1)*.5773;
-    vec3 n = h.xyy * map(p+h.xyy*e).x+
-             h.yyx * map(p+h.yyx*e).x+
-             h.yxy * map(p+h.yxy*e).x+
-             h.xxx * map(p+h.xxx*e).x;
-    return normalize(n);
-}
-
-vec2 marcher(vec3 ro, vec3 rd){
-	float d = 0.,m = 0.;
-    for(int i=0;i<90;i++){
-    	vec2 ray = map(ro + rd * d);
-        if(ray.x<MIN_DIST*d||d>MAX_DIST) break;
-        d += i<42?ray.x*.4:ray.x*.85;
-        m  = ray.y;
-    }
-	return vec2(d,m);
-}
-
-vec3 hue(float t){ 
-    t+=50.;
-    return .65+.45*cos(13.+PI2*t*(vec3(.25,.11,.99)*vec3(.95,.97,.98))); 
-}
-
-vec3 render(inout vec3 ro, inout vec3 rd, inout vec3 ref, inout float d, vec2 uv) {
-
-    vec3 C = vec3(0);
-    vec2 ray = marcher(ro,rd);
-    float m = ray.y;
-    d = ray.x;
-
-    if(d<MAX_DIST)
-    {
-        sid = gid;
-        hit = hitPoint;
-        
-        vec3 p = ro + rd * d,
-             n = normal(p,d);
-             
-        vec3 lpos =vec3(-10.,5,-12.),
-             l = normalize(lpos-p),
-             h = vec3(0), 
-             h2 = vec3(0);
-        
-        float shdw = 1.,
-              diff = clamp(dot(n,l),0.,1.);
-              
-        for( float t=.1; t < 10.; ) {
-            float h = map(p + l*t).x;
-            if( h<MIN_DIST ) { shdw = 0.; break; }
-            shdw = min(shdw, 10.*h/t);
-            t += h;
-            if( shdw<MIN_DIST || t>10. ) break;
-        }
-        diff = mix(diff,diff*shdw,.75);
-
-        float bnd = hash21(sid.xx);
-        float snd = fract(bnd*321.7) *3.-1.5;
-
-        vec3 aN = abs(n);
-        ivec3 idF = ivec3(n.x<-.25? 0 : 5, n.y<-.25? 1 : 4, n.z<-.25? 2 : 3);
-        int face = aN.x>.5? idF.x : aN.y>.5? idF.y : idF.z;
-        
-        vec2 hpp;
-        if( face == 0 ){  
-            hpp = hit.zy; 
-            hpp.x+=T*snd;
-        } else {
-            hpp = hit.xz; 
-            hpp.y+=T*snd;
-        }
-        vec2 dv = fract(hpp*2.)-.5,
-             id = floor(hpp*2.);
-
-        float ch = mod(id.x+id.y,2.)*2.-1.;
-        float px = 12./R.x;
-
-        float rnd = hash21(id+sid.xx);
-        
-        if(rnd<.45) dv.x = -dv.x;
-
-        vec2 gx = length(dv-.5)<length(dv+.5) ? vec2(dv-.5) : vec2(dv+.5);
-        float cx = length(gx)-.5;
-        
-        if(rnd>.65&&bnd<.75) cx = min(length(dv.x)-.005,length(dv.y)-.005);
-  
-        if (bnd<.25) cx = abs(cx)-.25;
-        if (bnd>.75) {
-            cx = (ch>.5 ^^ rnd<.45) ? smoothstep(px,-px,cx):smoothstep(-px,px,cx);
-        } else {
-            cx = smoothstep(px,-px, bnd>.7 ? abs(cx)-.2 : abs(cx)-.1 );
-        }
-    
-        h2 = vec3(.1);
-        h  = hue((T*.1)+(floor(sid.z+sid.y)-(p.z*.085)-(p.x*.1)));
-        
-        h = mix(h,h2,cx);
-        ref = mix(vec3(0),h,cx);
- 
-        C = diff * h;
-        
-        ro = p+n*.01;
-        rd = reflect(rd,n);
-    } 
-    
-    return C;
-}
-
-void mainImage( out vec4 O, in vec2 F )
-{   
-
-    wtime=T*.4;
-    speed = vec3(T*.45,0,0);
-    
-    float zoom = 10.;
-
-    vec2 uv = (2.*F.xy-R.xy)/max(R.x,R.y);
-    vec3 ro = vec3(uv*zoom,-(zoom+7.));
-    vec3 rd = vec3(0.,0.,1.);
-
-    //camera
-    mat2 rx = rot(-.5), ry = rot(.5);
-    
-    ro.yz *= rx, ro.xz *= ry;
-    rd.yz *= rx, rd.xz *= ry;
-
-    // reflection loop (@BigWings)
-    vec3 C = vec3(0), ref=vec3(0), fil=vec3(1);
-    vec4 FC = vec4(0);
-    
-    float d =0., a = 0., bnc = 2.;
-    for(float i=0.; i<bnc; i++) {
-        vec3 pass = render(ro, rd, ref, d, uv);
-        C += pass.rgb*fil;
-        fil*=ref;
-         if(i==0.) FC = vec4(vec3(.025),exp(-.000005*d*d*d*d));
-    }
-    
-    C = mix(C,FC.rgb,1.-FC.w);
-    C=pow(C, vec3(.4545));
-    O = vec4(C,1.0);
-}
-
 void main() { mainImage(gl_FragColor, gl_FragCoord.xy); }
