@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import * as THREE from 'three';
 import fragmentShader from './glsl/shader.frag'
 
-// ShaderToy component takes a Three.js scene as a prop
+// ShaderToy component takes a Three.js scene as a prop 
 const ShaderToy = ({ scene }) => {
   useEffect(() => {
     // Return early if there's no scene
